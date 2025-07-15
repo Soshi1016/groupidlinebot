@@ -1,3 +1,2 @@
 flask
 line-bot-sdk==3.4.0
-python-3.12.14
