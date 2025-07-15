@@ -1,62 +1,84 @@
 import os
+import json
+import base64
+import hashlib
+import hmac
 from flask import Flask, request, abort
-from linebot.v3 import WebhookHandler
-from linebot.v3.messaging import MessagingApi, Configuration
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# 環境変数からLINEのアクセストークンとシークレットを取得
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# 環境変数からLINEのチャネルシークレットを取得
+# このコードではメッセージの返信はしないため、アクセストークンは不要
 channel_secret = os.getenv("LINE_CHANNEL_SECRET")
 
-if channel_secret is None or channel_access_token is None:
-    print("環境変数が設定されていません。")
+if channel_secret is None:
+    print("環境変数 'LINE_CHANNEL_SECRET' が設定されていません。")
     abort(500)
-
-# LINE Botの設定
-handler = WebhookHandler(channel_secret)
-configuration = Configuration(access_token=channel_access_token)
-line_bot_api = MessagingApi(configuration)
 
 # ルートエンドポイント（起動確認用）
 @app.route("/", methods=["GET"])
 def index():
-    return "LINE Bot is running."
+    return "LINE Bot is running (manual handler)."
 
 # Webhookエンドポイント（LINEからのリクエストを受け取る）
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
-
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
+    # リクエストヘッダーから署名を取得
+    signature = request.headers.get("X-Line-Signature")
+    if not signature:
         abort(400)
+
+    # リクエストボディをバイト列として取得（重要）
+    body_bytes = request.get_data()
+
+    # --- 署名検証 ---
+    # チャネルシークレットをキーとして、リクエストボディからHMAC-SHA256のハッシュを計算
+    hash_obj = hmac.new(channel_secret.encode('utf-8'), body_bytes, hashlib.sha256).digest()
+    # 計算したハッシュをBase64エンコード
+    generated_signature = base64.b64encode(hash_obj).decode('utf-8')
+
+    # 署名が一致するかどうかを比較
+    if signature != generated_signature:
+        print("署名の検証に失敗しました。")
+        abort(400) # 署名が不正な場合は400エラー
+
+    # --- 署名検証ここまで ---
+
+    # リクエストボディをJSONとしてパース
+    try:
+        # バイト列をUTF-8でデコードしてからJSONとして読み込む
+        body_json = json.loads(body_bytes.decode('utf-8'))
+    except json.JSONDecodeError:
+        print("JSONのパースに失敗しました。")
+        abort(400)
+
+    # イベントをループして処理
+    for event in body_json.get('events', []):
+        # イベントのソースタイプを確認
+        source = event.get('source', {})
+        source_type = source.get('type')
+
+        # ソースが 'group' の場合
+        if source_type == 'group':
+            group_id = source.get('groupId')
+            if group_id:
+                # Renderのログに出力する
+                print(f"--- Group Event Detected ---")
+                print(f"  Event Type: {event.get('type')}")
+                print(f"  Group ID: {group_id}")
+                print(f"--------------------------")
+        
+        # ソースが 'user' の場合
+        elif source_type == 'user':
+            user_id = source.get('userId')
+            if user_id:
+                print(f"--- User Event Detected ---")
+                print(f"  Event Type: {event.get('type')}")
+                print(f"  User ID: {user_id}")
+                print(f"-------------------------")
 
     return "OK"
 
-# メッセージイベントのハンドラ（テキスト受信時の応答）
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
-    user_message = event.message.text
-    reply_token = event.reply_token
-
-    # 応答するテキスト
-    response_text = f"「{user_message}」と受け取りました！"
-
-    line_bot_api.reply_message(
-        reply_token,
-        [
-            {
-                "type": "text",
-                "text": response_text
-            }
-        ]
-    )
-
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
+    port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
